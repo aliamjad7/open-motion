@@ -54,7 +54,7 @@ export interface AtelierReport {
   stage: AtelierStage;
   flowSnapshot: ReturnType<typeof getFlowState>;
   heuristics: HeuristicsReport | null;
-  creativeContext: CreativeContextReport | null;
+  creativeContext: CreativeContextReport;
   checkpoint: AtelierCheckpoint | null;
   nextActions: string[];
   stageProgress: number; // 0..1 within current stage

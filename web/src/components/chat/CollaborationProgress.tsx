@@ -36,7 +36,7 @@ export function CollaborationProgress({ onComplete, onError }: CollaborationProg
         case "plan":
           setPlan(event.plan);
           setModules(
-            event.plan.modules.map((m) => ({
+            event.plan.modules.map((m: { id: string; name: string }) => ({
               moduleId: m.id,
               moduleName: m.name,
               status: "pending" as const,
@@ -109,7 +109,7 @@ export function CollaborationProgress({ onComplete, onError }: CollaborationProg
       const controller = new AbortController();
       abortRef.current = controller;
 
-      streamCollaboration(request, handleEvent, controller.signal).catch((err) => {
+      streamCollaboration(request, handleEvent, controller.signal).catch((err: unknown) => {
         setPhase("error");
         setActive(false);
         onError?.(err instanceof Error ? err.message : String(err));

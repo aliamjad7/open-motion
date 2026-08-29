@@ -71,6 +71,9 @@ export const ChatEventSchema = z.discriminatedUnion("type", [
     // emitters that have not been updated; the orchestrator sets this
     // explicitly so the chat UI can flag failed tools visually.
     ok: z.boolean().default(true),
+    // Whether this tool call mutated the project spec. Used to decide
+    // whether to run the quality pipeline and refresh the spec_update view.
+    specChanged: z.boolean().default(false),
   }),
   z.object({
     type: z.literal("spec_update"),
@@ -90,7 +93,7 @@ export const ChatEventSchema = z.discriminatedUnion("type", [
       reason: z.string(),
       tool: z.string(),
       prompt: z.string(),
-      kind: z.enum(["refine", "extend", "diversify", "interact", "sequence", "polish"]).default("refine"),
+      kind: z.enum(["refine", "extend", "diversify", "interact", "sequence", "polish", "collaborate", "export", "inspect"]).default("refine"),
     })).default([]),
   }),
   z.object({
@@ -190,6 +193,22 @@ export const ChatEventSchema = z.discriminatedUnion("type", [
     type: z.literal("parallel_tool_batch"),
     count: z.number(),
     tools: z.array(z.string()),
+  }),
+  z.object({
+    type: z.literal("quality_report"),
+    overall: z.number(),
+    grade: z.string(),
+    pass: z.boolean(),
+    autofixCount: z.number(),
+    dimensions: z.array(
+      z.object({
+        key: z.string(),
+        score: z.number(),
+        passed: z.boolean(),
+        findingCount: z.number(),
+      }),
+    ),
+    suggestedNext: z.array(z.string()),
   }),
 ]);
 export type ChatEvent = z.infer<typeof ChatEventSchema>;
