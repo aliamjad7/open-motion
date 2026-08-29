@@ -9,6 +9,7 @@ import type {
   Easing,
 } from "@openmotion/shared";
 import { apiGet, apiPost, apiPut, apiPatch, apiDelete } from "./client.js";
+import { authHeaders } from "./auth.js";
 
 export const health = () => apiGet<HealthResponse>("/health");
 
@@ -1630,6 +1631,63 @@ export const planCollaboration = (request: string) =>
 
 export const executeCollaboration = (request: string) =>
   apiPost<CollaborationResult>("/motion/collaboration/execute", { request });
+
+/** Streaming progress events emitted by POST /api/agent/collaboration/stream. */
+export type CollaborationStreamEvent =
+  | { type: "plan"; plan: CollaborationPlan }
+  | { type: "module_start"; moduleId: string; moduleName: string; objective: string }
+  | { type: "module_done"; moduleId: string; moduleName: string; confidence: number; notes: string }
+  | { type: "module_error"; moduleId: string; error: string }
+  | { type: "merge_start" }
+  | { type: "merge_done"; conflictResolutions: string[] }
+  | { type: "done"; result: CollaborationResult }
+  | { type: "error"; message: string };
+
+/**
+ * Stream a multi-module collaboration request over SSE. Parses the
+ * text/event-stream frames and dispatches typed events as each module
+ * completes. Returns a promise that resolves once the stream ends (on
+ * "done", "error", or the connection closing) so callers can `.catch` on
+ * network failures; cancel early via the provided AbortSignal.
+ */
+export async function streamCollaboration(
+  request: string,
+  onEvent: (event: CollaborationStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch("/api/agent/collaboration/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ request }),
+    signal,
+  });
+  if (!res.ok || !res.body) {
+    if (res.status === 401) {
+      throw new Error("unauthorized — set your OPENMOTION_API_KEY to access the backend");
+    }
+    throw new Error(`collaboration stream failed: ${res.status}`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() ?? "";
+    for (const frame of frames) {
+      const dataLine = frame.match(/^data:\s*(.*)$/m)?.[1];
+      if (!dataLine) continue;
+      try {
+        const parsed = JSON.parse(dataLine) as CollaborationStreamEvent;
+        onEvent(parsed);
+      } catch {
+        /* skip malformed frame */
+      }
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Motion Resonance Engine
@@ -3606,3 +3664,299 @@ export const predictIntent = (
     ...(projectId !== undefined ? { projectId } : {}),
     ...(topK !== undefined ? { topK } : {}),
   });
+
+// ---------------------------------------------------------------------------
+// Motion Intelligence Panel — dashboard, chronopath, creative context,
+// flow state, heuristics, and the atelier session workflow.
+// ---------------------------------------------------------------------------
+
+export interface IntelligenceScoreCard {
+  label: string;
+  score: number;
+  max: number;
+  status: "excellent" | "good" | "fair" | "poor";
+  detail: string;
+}
+
+/** Same shape as the chat store's ProactiveSuggestion — duplicated here so
+ * this module stays free-standing (no import from the store). */
+export interface IntelligenceProactiveSuggestion {
+  title: string;
+  reason: string;
+  tool: string;
+  prompt: string;
+  kind: "refine" | "extend" | "diversify" | "interact" | "sequence" | "polish" | "collaborate" | "export" | "inspect";
+}
+
+export interface IntelligenceSummary {
+  generatedAt: string;
+  overallScore: number;
+  grade: string;
+  scorecards: IntelligenceScoreCard[];
+  warnings: string[];
+  recommendations: string[];
+  dnaDistribution: Record<string, number>;
+  easingDistribution: Record<string, number>;
+  durationBuckets: { fast: number; normal: number; slow: number };
+  collaborationReadiness: {
+    totalModules: number;
+    activatedModules: string[];
+    moduleNames: string[];
+  };
+  proactiveSuggestions: IntelligenceProactiveSuggestion[];
+  stats: {
+    componentCount: number;
+    propertyCount: number;
+    easingVariety: number;
+    loopCount: number;
+    totalDurationMs: number;
+    averageDurationMs: number;
+  };
+  narrative: {
+    hasArc: boolean;
+    beatCount: number;
+    tensionCurve: string;
+  };
+  physics: {
+    simulated: boolean;
+    forcesDetected: string[];
+    energyLevel: string;
+  };
+  entropy: {
+    overallEntropy: number;
+    densityWindows: number;
+  };
+}
+
+/** Comprehensive intelligence dashboard aggregating every analysis engine. */
+export const getIntelligenceSummary = (projectId: string) =>
+  apiGet<IntelligenceSummary>(`/projects/${encodeURIComponent(projectId)}/intelligence`);
+
+export interface GazeTarget {
+  timeMs: number;
+  componentId: string;
+  componentName: string;
+  x: number;
+  y: number;
+  confidence: number;
+  reason: "motion_onset" | "color_contrast" | "size_dominant" | "trajectory_end" | "novelty" | "social_cue" | "brightness";
+}
+
+export interface GazeSegment {
+  startMs: number;
+  endMs: number;
+  fromIndex: number;
+  toIndex: number;
+  type: "saccade" | "smooth_pursuit" | "fixation";
+  angle: number;
+  distance: number;
+}
+
+export interface GazeCollision {
+  timeMs: number;
+  competitors: string[];
+  severity: number;
+  recommendation: string;
+}
+
+export interface GazeDeadZone {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  hasContent: boolean;
+  suggestion: string;
+}
+
+export interface RevealOrdering {
+  orderedIds: string[];
+  pattern: "F_pattern" | "Z_pattern" | "diagonal" | "center_out" | "left_to_right";
+  confidence: number;
+  rationale: string;
+}
+
+export interface ChronopathReport {
+  gazePath: GazeTarget[];
+  segments: GazeSegment[];
+  collisions: GazeCollision[];
+  deadZones: GazeDeadZone[];
+  revealOrdering: RevealOrdering;
+  efficiencyScore: number;
+  totalGazeDistance: number;
+  fixationCount: number;
+  avgFixationMs: number;
+  summary: string;
+}
+
+/** Predict the viewer's gaze trajectory through the animation timeline. */
+export const predictChronopath = (projectId: string) =>
+  apiGet<ChronopathReport>(`/projects/${encodeURIComponent(projectId)}/chronopath`);
+
+export type CreativeIntent =
+  | "establish_hierarchy"
+  | "create_rhythm"
+  | "build_tension"
+  | "release_tension"
+  | "add_personality"
+  | "refine_timing"
+  | "harmonize_palette"
+  | "optimize_attention"
+  | "add_interactivity"
+  | "prepare_export"
+  | "explore_alternatives"
+  | "fix_accessibility"
+  | "narrative_beat"
+  | "brand_alignment"
+  | "performance_tuning"
+  | "creative_exploration";
+
+export interface CreativeDecision {
+  timestamp: number;
+  action: string;
+  componentId?: string;
+  summary: string;
+  intent: CreativeIntent;
+  approved: boolean;
+}
+
+export type DetectedStyle =
+  | "minimal"
+  | "playful"
+  | "corporate"
+  | "cinematic"
+  | "brutalist"
+  | "organic"
+  | "futuristic"
+  | "retro"
+  | "elegant"
+  | "experimental"
+  | "undetermined";
+
+export interface ContextRecommendation {
+  action: string;
+  reason: string;
+  tool: string;
+  prompt: string;
+  priority: number;
+}
+
+export interface CreativeDirection {
+  primaryIntent: CreativeIntent;
+  secondaryIntents: CreativeIntent[];
+  maturity: number;
+  confidence: number;
+  style: DetectedStyle;
+  velocity: number;
+  recommendations: ContextRecommendation[];
+}
+
+export interface DesignPattern {
+  name: string;
+  description: string;
+  confidence: number;
+  components: string[];
+}
+
+export interface SessionStats {
+  totalActions: number;
+  uniqueComponentsTouched: number;
+  averageActionsPerComponent: number;
+  timeSpentMs: number;
+  intentDistribution: Record<string, number>;
+  mostUsedTools: Array<{ tool: string; count: number }>;
+  experimentationRate: number;
+}
+
+export interface CreativeContextReport {
+  decisions: CreativeDecision[];
+  direction: CreativeDirection;
+  patterns: DesignPattern[];
+  stats: SessionStats;
+  summary: string;
+  timestamp: number;
+}
+
+/** Analyze the creative session context — direction, patterns, and stats. */
+export const analyzeCreativeContext = (projectId: string) =>
+  apiGet<CreativeContextReport>(`/projects/${encodeURIComponent(projectId)}/creative-context`);
+
+export type FlowPhase = "warming_up" | "flow" | "exploration" | "stagnation" | "cooling_down";
+
+export interface FlowStateSnapshot {
+  phase: FlowPhase;
+  momentum: number;
+  focusScore: number;
+  experimentationScore: number;
+  velocityActionsPerMin: number;
+  totalTimeMs: number;
+  phaseDurationMs: number;
+  recommendations: string[];
+  summary: string;
+}
+
+/** Get the current creative flow state — momentum, focus, and phase. */
+export const getFlowState = (projectId: string) =>
+  apiGet<FlowStateSnapshot>(`/projects/${encodeURIComponent(projectId)}/flow-state`);
+
+export interface HeuristicResult {
+  id: string;
+  name: string;
+  category: "timing" | "hierarchy" | "rhythm" | "contrast" | "consistency" | "accessibility" | "performance";
+  score: number;
+  rationale: string;
+  suggestion: string;
+  affectedComponents: string[];
+}
+
+export interface HeuristicsReport {
+  results: HeuristicResult[];
+  compositeScore: number;
+  topIssue: string | null;
+  quickWins: string[];
+  summary: string;
+}
+
+/** Run design heuristics against the project's components. */
+export const runHeuristics = (projectId: string) =>
+  apiGet<HeuristicsReport>(`/projects/${encodeURIComponent(projectId)}/heuristics`);
+
+export type AtelierStage = "intake" | "exploration" | "refinement" | "validation" | "delivery";
+
+export interface AtelierCheckpoint {
+  stage: AtelierStage;
+  timestamp: number;
+  flowPhase: FlowPhase;
+  heuristicScore: number;
+  creativeMaturity: number;
+  recommendation: string;
+}
+
+export interface AtelierReport {
+  stage: AtelierStage;
+  flowSnapshot: FlowStateSnapshot;
+  heuristics: HeuristicsReport | null;
+  creativeContext: CreativeContextReport;
+  checkpoint: AtelierCheckpoint | null;
+  nextActions: string[];
+  stageProgress: number;
+  overallProgress: number;
+  summary: string;
+}
+
+/** Get a comprehensive creative session report unifying flow, heuristics, and context. */
+export const getAtelierReport = (projectId: string) =>
+  apiGet<AtelierReport>(`/projects/${encodeURIComponent(projectId)}/atelier`);
+
+export interface AtelierManifesto {
+  creativeDirection: string;
+  styleArchetype: string;
+  keyDecisions: string[];
+  qualityJourney: { time: number; score: number }[];
+  breakthroughs: string[];
+  finalScore: number;
+  narrative: string;
+}
+
+/** Generate the final session manifesto — narrative, breakthroughs, and quality timeline. */
+export const generateManifesto = (projectId: string) =>
+  apiGet<AtelierManifesto>(`/projects/${encodeURIComponent(projectId)}/manifesto`);

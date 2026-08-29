@@ -347,7 +347,7 @@ catalogRouter.get("/catalog/search", (req, res) => {
 
   // Search cursor choreography presets
   for (const c of listCursorChoreography()) {
-    const score = scoreMatch(query, [c.name, c.description, c.pattern, ...c.tags]);
+    const score = scoreMatch(query, [c.name, c.description, c.category, ...c.tags]);
     if (score > 0) results.push({ type: "cursor-choreography", id: c.id, name: c.name, description: c.description, score });
   }
 
